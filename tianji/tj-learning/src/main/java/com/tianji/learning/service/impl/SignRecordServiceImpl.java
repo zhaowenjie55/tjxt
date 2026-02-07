@@ -17,6 +17,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
@@ -27,27 +28,34 @@ public class SignRecordServiceImpl implements ISignRecordService {
 
     private final RabbitMqHelper mqHelper;
 
+
+    /**
+     * 用 Redis bitmap 记录当天签到，防止重复签到；
+     * 然后统计连续签到天数，计算奖励积分，发送 MQ 消息完成积分记录。
+     * @return
+     */
     @Override
     public SignResultVO addSignRecords() {
         // 1.签到
-        // 1.1.获取登录用户
+// 1.1.获取登录用户
         Long userId = UserContext.getUser();
-        // 1.2.获取日期
+// 1.2.获取日期
         LocalDate now = LocalDate.now();
-        // 1.3.拼接key
+// 1.3.拼接key
         String key = RedisConstants.SIGN_RECORD_KEY_PREFIX
                 + userId
                 + now.format(DateUtils.SIGN_DATE_SUFFIX_FORMATTER);
-        // 1.4.计算offset
-        int offset = now.getDayOfMonth() - 1;
-        // 1.5.保存签到信息
-        Boolean exists = redisTemplate.opsForValue().setBit(key, offset, true);
+// 1.4.计算offset
+        int offset = now.getDayOfMonth() - 1; //bitMap 从位置 0 开始。
+// 1.5.保存签到信息
+        Boolean exists = redisTemplate.opsForValue().setBit(key, offset, true); //返回旧值（true 表示以前已经签到过）
         if (BooleanUtils.isTrue(exists)) {
+            // oldValue=true 说明今天已签到，禁止重复
             throw new BizIllegalException("不允许重复签到！");
         }
-        // 2.计算连续签到天数
+// 2.计算连续签到天数
         int signDays = countSignDays(key, now.getDayOfMonth());
-        // 3.计算签到得分
+// 3.计算签到得分
         int rewardPoints = 0;
         switch (signDays) {
             case 7:
@@ -60,17 +68,25 @@ public class SignRecordServiceImpl implements ISignRecordService {
                 rewardPoints = 40;
                 break;
         }
-        // 4.保存积分明细记录
+// 4.保存积分明细记录
+/*
+ •给用户记录 rewardPoints + 1 分
+    •为什么 +1？
+     →签到本身就给 1 积分，连续签到额外奖励是 rewardPoints。
+*/
         mqHelper.send(
                 MqConstants.Exchange.LEARNING_EXCHANGE,
                 MqConstants.Key.SIGN_IN,
                 SignInMessage.of(userId, rewardPoints + 1));
-        // 5.封装返回
+// 5.封装返回
         SignResultVO vo = new SignResultVO();
         vo.setSignDays(signDays);
         vo.setRewardPoints(rewardPoints);
         return vo;
+
+
     }
+
 
     @Override
     public Byte[] querySignRecords() {
@@ -86,7 +102,12 @@ public class SignRecordServiceImpl implements ISignRecordService {
         // 4.读取
         List<Long> result = redisTemplate.opsForValue()
                 .bitField(key, BitFieldSubCommands.create().get(
+                        // 	BitFieldType.unsigned(dayOfMonth)：定义一个 无符号整数类型，位宽 = dayOfMonth
+                        // 	比如今天 18 号 → 取一个 18 位的无符号数
                         BitFieldSubCommands.BitFieldType.unsigned(dayOfMonth)).valueAt(0));
+
+        // 	.valueAt(0)：
+        //从第 0 位开始算起（也就是从 1 号那一天的 bit 开始）
         if (CollUtils.isEmpty(result)) {
             return new Byte[0];
         }
@@ -100,6 +121,8 @@ public class SignRecordServiceImpl implements ISignRecordService {
             num >>>= 1;
         }
         return arr;
+
+
     }
 
     private int countSignDays(String key, int len) {

@@ -1,5 +1,6 @@
 package com.tianji.learning.service.impl;
 
+import cn.hutool.core.lang.hash.Hash;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tianji.api.client.user.UserClient;
@@ -44,23 +45,24 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
 
     @Override
     public PointsBoardVO queryPointsBoardBySeason(PointsBoardQuery query) {
-        // 1.判断是否是查询当前赛季
+        Long userId = UserContext.getUser();
+// 1.判断是否是查询当前赛季
         Long season = query.getSeason();
         boolean isCurrent = season == null || season == 0;
-        // 2.获取Redis的Key
+// 2.获取Redis的Key
         LocalDateTime now = LocalDateTime.now();
         String key = RedisConstants.POINTS_BOARD_KEY_PREFIX + now.format(DateUtils.POINTS_BOARD_SUFFIX_FORMATTER);
-        // 2.查询我的积分和排名
+// 2.查询我的积分和排名
         PointsBoard myBoard = isCurrent ?
                 queryMyCurrentBoard(key) : // 查询当前榜单（Redis）
                 queryMyHistoryBoard(season); // 查询历史榜单（MySQL）
-        // 3.查询榜单列表
+// 3.查询榜单列表
         List<PointsBoard> list = isCurrent ?
                 queryCurrentBoardList(key, query.getPageNo(), query.getPageSize()) :
                 queryHistoryBoardList(query);
-        // 4.封装VO
+// 4.封装VO
         PointsBoardVO vo = new PointsBoardVO();
-        // 4.1.处理我的信息
+// 4.1.处理我的信息
         if (myBoard != null) {
             vo.setPoints(myBoard.getPoints());
             vo.setRank(myBoard.getRank());
@@ -68,14 +70,14 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
         if (CollUtils.isEmpty(list)) {
             return vo;
         }
-        // 4.2.查询用户信息
+// 4.2.查询用户信息
         Set<Long> uIds = list.stream().map(PointsBoard::getUserId).collect(Collectors.toSet());
         List<UserDTO> users = userClient.queryUserByIds(uIds);
         Map<Long, String> userMap = new HashMap<>(uIds.size());
-        if(CollUtils.isNotEmpty(users)) {
+        if (CollUtils.isNotEmpty(users)) {
             userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, UserDTO::getName));
         }
-        // 4.3.转换VO
+// 4.3.转换VO
         List<PointsBoardItemVO> items = new ArrayList<>(list.size());
         for (PointsBoard p : list) {
             PointsBoardItemVO v = new PointsBoardItemVO();
@@ -86,6 +88,8 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
         }
         vo.setBoardList(items);
         return vo;
+
+
     }
 
     @Override
@@ -149,6 +153,7 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
         PointsBoard pointsBoard = opt.get();
         pointsBoard.setRank(pointsBoard.getId().intValue());
         return pointsBoard;
+
     }
 
     private PointsBoard queryMyCurrentBoard(String key) {
@@ -166,4 +171,5 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
         p.setRank(rank == null ? 0 : rank.intValue() + 1);
         return p;
     }
+
 }

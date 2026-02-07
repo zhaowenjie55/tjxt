@@ -6,6 +6,7 @@ import com.tianji.auth.service.IPrivilegeService;
 import com.tianji.auth.util.PrivilegeCache;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -15,6 +16,7 @@ import java.util.List;
 @Slf4j
 @Component
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "tj.auth.load-privilege", havingValue = "true", matchIfMissing = true)  // 🔴 允许通过配置禁用
 public class LoadPrivilegeRunner{
 
     private final IPrivilegeService privilegeService;

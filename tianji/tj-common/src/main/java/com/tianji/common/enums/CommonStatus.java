@@ -5,12 +5,22 @@ import lombok.Getter;
 
 @Getter
 @AllArgsConstructor
-public enum CommonStatus implements BaseEnum{
+public enum CommonStatus implements BaseEnum {
     DISABLE(0, "禁用"),
-    ENABLE(1, "启用"),
-    ;
+    ENABLE(1, "启用");
+
     private final int value;
     private final String desc;
+
+    @Override
+    public int getValue() {
+        return this.value;
+    }
+
+    @Override
+    public String getDesc() {
+        return this.desc;
+    }
 
     public static CommonStatus of(Integer value) {
         if (value == null) {

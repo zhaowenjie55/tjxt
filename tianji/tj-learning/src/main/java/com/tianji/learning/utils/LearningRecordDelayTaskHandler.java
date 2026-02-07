@@ -9,6 +9,7 @@ import com.tianji.learning.service.ILearningLessonService;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
+import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -22,79 +23,81 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.DelayQueue;
 
 @Slf4j
-@Component
 @RequiredArgsConstructor
+@Component
 public class LearningRecordDelayTaskHandler {
 
     private final StringRedisTemplate redisTemplate;
-    private final LearningRecordMapper recordMapper;
-    private final ILearningLessonService lessonService;
     private final DelayQueue<DelayTask<RecordTaskData>> queue = new DelayQueue<>();
     private final static String RECORD_KEY_TEMPLATE = "learning:record:{}";
+    private final LearningRecordMapper recordMapper;
+    private final ILearningLessonService lessonService;
     private static volatile boolean begin = true;
 
+    @SneakyThrows
     @PostConstruct
     public void init(){
         CompletableFuture.runAsync(this::handleDelayTask);
     }
     @PreDestroy
     public void destroy(){
+        log.debug("关闭学习记录处理的延迟任务");
         begin = false;
-        log.debug("延迟任务停止执行！");
     }
-
-    public void handleDelayTask(){
+    private void handleDelayTask() throws InterruptedException {
         while (begin) {
             try {
-                // 1.获取到期的延迟任务
                 DelayTask<RecordTaskData> task = queue.take();
+                log.debug("处理学习记录的延迟任务，当前时间：{}", LocalDateTime.now());
                 RecordTaskData data = task.getData();
-                // 2.查询Redis缓存
+
                 LearningRecord record = readRecordCache(data.getLessonId(), data.getSectionId());
+
                 if (record == null) {
                     continue;
                 }
-                // 3.比较数据，moment值
-                if(!Objects.equals(data.getMoment(), record.getMoment())) {
-                    // 不一致，说明用户还在持续提交播放进度，放弃旧数据
+
+                if (! Objects.equals(data.getMoment(), record.getMoment())) {
                     continue;
                 }
 
-                // 4.一致，持久化播放进度数据到数据库
-                // 4.1.更新学习记录的moment
                 record.setFinished(null);
                 recordMapper.updateById(record);
-                // 4.2.更新课表最近学习信息
+
                 LearningLesson lesson = new LearningLesson();
                 lesson.setId(data.getLessonId());
-                lesson.setLatestSectionId(data.getSectionId());
                 lesson.setLatestLearnTime(LocalDateTime.now());
+                lesson.setLatestSectionId(data.getSectionId());
                 lessonService.updateById(lesson);
+
+                log.debug("学习记录的延迟任务处理完成");
+
             } catch (Exception e) {
-                log.error("处理延迟任务发生异常", e);
+                log.error("处理学习记录的延迟任务异常", e);
             }
+
         }
+
+
+
     }
 
     public void addLearningRecordTask(LearningRecord record){
-        // 1.添加数据到Redis缓存
         writeRecordCache(record);
-        // 2.提交延迟任务到延迟队列 DelayQueue
         queue.add(new DelayTask<>(new RecordTaskData(record), Duration.ofSeconds(20)));
+
     }
 
     public void writeRecordCache(LearningRecord record) {
-        log.debug("更新学习记录的缓存数据");
+        log.debug("写入学习记录缓存，当前时间：{}", LocalDateTime.now());
         try {
-            // 1.数据转换
-            String json = JsonUtils.toJsonStr(new RecordCacheData(record));
-            // 2.写入Redis
-            String key = StringUtils.format(RECORD_KEY_TEMPLATE, record.getLessonId());
-            redisTemplate.opsForHash().put(key, record.getSectionId().toString(), json);
-            // 3.添加缓存过期时间
+            String jsonStr = JsonUtils.toJsonStr(new RecordCacheData(record));
+            String key = StringUtils.format(RECORD_KEY_TEMPLATE, record.getLessonId(), record.getSectionId());
+            redisTemplate.opsForHash().put(key, record.getSectionId(), jsonStr);
             redisTemplate.expire(key, Duration.ofMinutes(1));
+
         } catch (Exception e) {
-            log.error("更新学习记录缓存异常", e);
+            log.error("缓存写入异常", e);
         }
     }
 
@@ -147,3 +150,4 @@ public class LearningRecordDelayTaskHandler {
         }
     }
 }
+

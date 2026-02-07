@@ -3,9 +3,36 @@ spring:
     nacos:
       server-addr: 192.168.150.101:8848 # nacos注册中心
       discovery:
+        enabled: false  # 🔴 本地开发禁用 Nacos 注册
         namespace: f923fb34-cb0a-4c06-8fca-ad61ea61a3f0
         group: DEFAULT_GROUP
         ip: 192.168.150.101
+      config:
+        enabled: false  # 🔴 本地开发禁用 Nacos 配置
+  # 🔴 使用本地 Docker MySQL（端口 3307）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3307/tj_auth?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: 123
+  # 🔴 使用本地 Docker Redis（无密码）
+  redis:
+    host: localhost
+    port: 6379
+    lettuce:
+      pool:
+        max-active: 8
+        max-idle: 8
+        min-idle: 1
+        max-wait: 300
+  # 修复 Swagger 兼容性
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+# 禁用权限加载（dev 环境，避免启动依赖权限数据）
+tj:
+  auth:
+    load-privilege: false  # 🔴 本地开发禁用权限缓存加载
 logging:
   level:
     com.tianji: debug

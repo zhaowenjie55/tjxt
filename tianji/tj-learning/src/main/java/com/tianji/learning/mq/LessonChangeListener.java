@@ -17,7 +17,6 @@ import org.springframework.stereotype.Component;
 @Component
 @RequiredArgsConstructor
 public class LessonChangeListener {
-
     private final ILearningLessonService lessonService;
 
     @RabbitListener(bindings = @QueueBinding(
@@ -53,4 +52,5 @@ public class LessonChangeListener {
         log.debug("监听到用户{}的订单{}要退款，需要删除课程{}", order.getUserId(), order.getOrderId(), order.getCourseIds());
         lessonService.deleteCourseFromLesson(order.getUserId(), order.getCourseIds().get(0));
     }
+
 }

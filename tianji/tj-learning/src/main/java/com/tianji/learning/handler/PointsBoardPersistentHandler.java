@@ -44,41 +44,28 @@ public class PointsBoardPersistentHandler {
 
     @XxlJob("savePointsBoard2DB")
     public void savePointsBoard2DB(){
-        // 1.获取上月时间
         LocalDateTime time = LocalDateTime.now().minusMonths(1);
 
-        // 2.计算动态表名
-        // 2.1.查询赛季信息
         Integer season = seasonService.querySeasonByTime(time);
-        // 2.2.存入ThreadLocal
         TableInfoContext.setInfo(POINTS_BOARD_TABLE_PREFIX + season);
 
-        // 3.查询榜单数据
-        // 3.1.拼接KEY
         String key = RedisConstants.POINTS_BOARD_KEY_PREFIX + time.format(DateUtils.POINTS_BOARD_SUFFIX_FORMATTER);
-        // 3.2.查询数据
+
         int index = XxlJobHelper.getShardIndex();
         int total = XxlJobHelper.getShardTotal();
         int pageNo = index + 1;
         int pageSize = 10;
+
         while (true) {
             List<PointsBoard> boardList = pointsBoardService.queryCurrentBoardList(key, pageNo, pageSize);
             if (CollUtils.isEmpty(boardList)) {
                 break;
             }
-            // 4.持久化到数据库
-            // 4.1.把排名信息写入id
             boardList.forEach(b -> {
                 b.setId(b.getRank().longValue());
                 b.setRank(null);
             });
-            // 4.2.持久化
-            pointsBoardService.saveBatch(boardList);
-            // 5.翻页
-            pageNo+=total;
         }
-
-        TableInfoContext.remove();
     }
 
     @XxlJob("clearPointsBoardFromRedis")

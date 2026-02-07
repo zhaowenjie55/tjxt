@@ -25,7 +25,7 @@ public class GatewayApplication {
                         "Application '{}' is running! Access URLs:\n\t" +
                         "Local: \t\t{}://localhost:{}\n\t" +
                         "External: \t{}://{}:{}\n\t" +
-                        "Profile(s): \t{}" +
+                        "Prozfile(s): \t{}" +
                         "\n---------------------------------------------------------------------------------------",
                 env.getProperty("spring.application.name"),
                 protocol,

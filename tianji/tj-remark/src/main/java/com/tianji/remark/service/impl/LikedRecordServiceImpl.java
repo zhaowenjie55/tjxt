@@ -6,11 +6,13 @@ import com.tianji.api.dto.remark.LikedTimesDTO;
 import com.tianji.common.autoconfigure.mq.RabbitMqHelper;
 import com.tianji.common.utils.StringUtils;
 import com.tianji.common.utils.UserContext;
+import com.tianji.remark.constants.RedisConstants;
 import com.tianji.remark.domain.dto.LikeRecordFormDTO;
 import com.tianji.remark.domain.po.LikedRecord;
 import com.tianji.remark.mapper.LikedRecordMapper;
 import com.tianji.remark.service.ILikedRecordService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.List;
 import java.util.Set;
@@ -31,6 +33,7 @@ import static com.tianji.common.constants.MqConstants.Key.LIKED_TIMES_KEY_TEMPLA
 public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, LikedRecord> implements ILikedRecordService {
 
     private final RabbitMqHelper mqHelper;
+    private final StringRedisTemplate redisTemplate;
 
     @Override
     public void addLikeRecord(LikeRecordFormDTO recordDTO) {
@@ -40,6 +43,13 @@ public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, Liked
         if (!success) {
             return;
         }
+//        // 3.如果执行成功，统计点赞总数
+//        redisTemplate.opsForZSet().add(
+//                RedisConstants.LIKES_BIZ_KEY_PREFIX + recordDTO.getBizType(),
+//                recordDTO.getBizId().toString(),
+//                readLikedTimesAndSendMessage();
+//        )
+
         // 3.如果执行成功，统计点赞总数
         Integer likedTimes = lambdaQuery()
                 .eq(LikedRecord::getBizId, recordDTO.getBizId())
@@ -49,19 +59,21 @@ public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, Liked
                 LIKE_RECORD_EXCHANGE,
                 StringUtils.format(LIKED_TIMES_KEY_TEMPLATE, recordDTO.getBizType()),
                 LikedTimesDTO.of(recordDTO.getBizId(), likedTimes));
+
     }
 
     @Override
     public Set<Long> isBizLiked(List<Long> bizIds) {
-        // 1.获取登录用户id
-        Long userId = UserContext.getUser();
-        // 2.查询点赞状态
+        // 1.获取当前登录用户
+        Long user = UserContext.getUser();
+        // 2.查询当前用户对这些业务实体是否点赞
         List<LikedRecord> list = lambdaQuery()
-                .in(LikedRecord::getBizId, bizIds)
-                .eq(LikedRecord::getUserId, userId)
+                .eq(LikedRecord::getBizId, bizIds)
+                .eq(LikedRecord::getBizId, user)
                 .list();
-        // 3.返回结果
+    // 3.转换结果并返回
         return list.stream().map(LikedRecord::getBizId).collect(Collectors.toSet());
+
     }
 
     @Override
@@ -70,12 +82,14 @@ public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, Liked
     }
 
     private boolean unlike(LikeRecordFormDTO recordDTO) {
-        return remove(new QueryWrapper<LikedRecord>().lambda()
-                .eq(LikedRecord::getUserId, UserContext.getUser())
-                .eq(LikedRecord::getBizId, recordDTO.getBizId()));
+       return remove(new QueryWrapper<LikedRecord>().lambda()
+               .eq(LikedRecord::getUserId, UserContext.getUser())
+               .eq(LikedRecord::getBizId, recordDTO.getBizId()));
+
     }
 
     private boolean like(LikeRecordFormDTO recordDTO) {
+
         Long userId = UserContext.getUser();
         // 1.查询点赞记录
         Integer count = lambdaQuery()
@@ -94,4 +108,5 @@ public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, Liked
         save(r);
         return true;
     }
+
 }

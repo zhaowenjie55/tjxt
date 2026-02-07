@@ -1,5 +1,6 @@
 package com.tianji.learning.service.impl;
 
+import com.alibaba.nacos.client.naming.utils.CollectionUtils;
 import com.baomidou.mybatisplus.core.metadata.OrderItem;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -52,103 +53,138 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
     @Override
     @Transactional
     public void saveReply(ReplyDTO replyDTO) {
-        // 1.获取登录用户
+
+        // 1) 获取当前登录用户ID
         Long userId = UserContext.getUser();
-        // 2.新增回答
+
+        // 2) 新增回复（可能是“回答”也可能是“评论”）
         InteractionReply reply = BeanUtils.toBean(replyDTO, InteractionReply.class);
-        reply.setUserId(userId);
-        save(reply);
-        // 3.累加评论数或者累加回答数
-        // 3.1.判断当前回复的类型是否是回答
+        reply.setUserId(userId); // 防止前端伪造userId
+        save(reply);             // 插入后 reply.getId() 才是本次新回复的主键
+
+        // 3) 判断这次回复类型：answerId == null -> 回答；否则 -> 评论
         boolean isAnswer = replyDTO.getAnswerId() == null;
+
+        // 3.1) 如果是评论：给被评论的“上级回答”的评论数 reply_times + 1
         if (!isAnswer) {
-            // 3.2.是评论，则需要更新上级回答的评论数量
             lambdaUpdate()
                     .setSql("reply_times = reply_times + 1")
                     .eq(InteractionReply::getId, replyDTO.getAnswerId())
                     .update();
         }
-        // 3.3.尝试更新问题表中的状态、 最近一次回答、回答数量
+
+        // 3.2) 更新问题表（interaction_question）
+        // - 如果是回答：更新 latest_answer_id = 本次新插入回复的 id
+        // - 如果是回答：answer_times + 1
+        // - 如果是学生：将状态改为待审核（如果你们业务只允许“学生回答触发审核”，可加 isAnswer && isStudent）
+        boolean isStudent = Boolean.TRUE.equals(replyDTO.getIsStudent());
+
         questionService.lambdaUpdate()
-                .set(isAnswer, InteractionQuestion::getLatestAnswerId, reply.getAnswerId())
+                // ✅ 关键修正：最新回答ID 应该是 reply.getId()
+                .set(isAnswer, InteractionQuestion::getLatestAnswerId, reply.getId())
                 .setSql(isAnswer, "answer_times = answer_times + 1")
-                .set(replyDTO.getIsStudent(), InteractionQuestion::getStatus, QuestionStatus.UN_CHECK.getValue())
+                // 如需更严格：.set(isAnswer && isStudent, InteractionQuestion::getStatus, UN_CHECK)
+                .set(isStudent, InteractionQuestion::getStatus, QuestionStatus.UN_CHECK.getValue())
                 .eq(InteractionQuestion::getId, replyDTO.getQuestionId())
                 .update();
 
-        // 4.尝试累加积分
-        if(replyDTO.getIsStudent()) {
-            // 学生才需要累加积分
+        // 4) 学生回复才加积分：发MQ给积分系统（异步）
+        if (isStudent) {
             mqHelper.send(
                     MqConstants.Exchange.LEARNING_EXCHANGE,
                     MqConstants.Key.WRITE_REPLY,
-                    5);
+                    5
+            );
         }
     }
 
+    /**
+     * queryReplyPage() 用于查询某问题下的回答、或某回答下的评论。
+     * 支持匿名、管理员视角、目标回复用户昵称、点赞状态的查询，并且通过大量的“批量查询 + Map 缓存”来提升性能。
+     * @param query
+     * @param forAdmin
+     * @return
+     */
     @Override
     public PageDTO<ReplyVO> queryReplyPage(ReplyPageQuery query, boolean forAdmin) {
-        // 1.问题id和回答id至少要有一个，先做参数判断
+
+        // 1) 参数校验：问题id / 回答id 至少提供一个
         Long questionId = query.getQuestionId();
         Long answerId = query.getAnswerId();
         if (questionId == null && answerId == null) {
             throw new BadRequestException("问题或回答id不能都为空");
         }
-        // 标记当前是查询问题下的回答
+
+        // 2) 判断查询类型：questionId 有值 -> 查“问题下的回答”；否则 -> 查“回答下的评论”
         boolean isQueryAnswer = questionId != null;
-        // 2.分页查询reply
+
+        // 3) 分页查询回复（interaction_reply）
         Page<InteractionReply> page = lambdaQuery()
+                // 3.1 查回答：where question_id = ?（查评论时不需要这个条件）
                 .eq(isQueryAnswer, InteractionReply::getQuestionId, questionId)
+                // 3.2 查回答：answer_id = 0；查评论：answer_id = answerId
                 .eq(InteractionReply::getAnswerId, isQueryAnswer ? 0L : answerId)
+                // 3.3 非管理员需要过滤隐藏回复：hidden=false；管理员不过滤
                 .eq(!forAdmin, InteractionReply::getHidden, false)
-                .page(query.toMpPage( // 先根据点赞数排序，点赞数相同，再按照创建时间排序
+                // 3.4 排序：先按点赞字段，再按创建时间（同点赞情况下更早/更晚看配置）
+                .page(query.toMpPage(
                         new OrderItem(DATA_FIELD_NAME_LIKED_TIME, false),
-                        new OrderItem(DATA_FIELD_NAME_CREATE_TIME, true))
-                );
+                        new OrderItem(DATA_FIELD_NAME_CREATE_TIME, true)
+                ));
+
         List<InteractionReply> records = page.getRecords();
         if (CollUtils.isEmpty(records)) {
             return PageDTO.empty(page);
         }
-        // 3.数据处理，需要查询：提问者信息、回复目标信息、当前用户是否点赞
+
+        // 4) 批量准备数据：用户信息、目标回复信息、点赞状态（避免N+1）
         Set<Long> userIds = new HashSet<>();
-        Set<Long> answerIds = new HashSet<>();
-        Set<Long> targetReplyIds = new HashSet<>();
-        // 3.1.获取提问者id 、回复的目标id、当前回答或评论id（统计点赞信息）
+        Set<Long> replyIds = new HashSet<>();        // 用于查询点赞状态（bizLiked）
+        Set<Long> targetReplyIds = new HashSet<>();  // 用于查询目标回复（拿目标用户信息）
+
+        // 4.1 收集：回复人id、目标回复id、当前回复id
         for (InteractionReply r : records) {
-            if(!r.getAnonymity() || forAdmin) {
-                // 非匿名
+            // 匿名：普通用户不展示用户信息；管理员可以看
+            if (!Boolean.TRUE.equals(r.getAnonymity()) || forAdmin) {
                 userIds.add(r.getUserId());
             }
             targetReplyIds.add(r.getTargetReplyId());
-            answerIds.add(r.getId());
+            replyIds.add(r.getId());
         }
-        // 3.2.查询目标回复，如果目标回复不是匿名，则需要查询出目标回复的用户信息
-        targetReplyIds.remove(0L);
+
+        // 4.2 查询目标回复：如果目标回复非匿名，则把目标回复的 userId 也加入 userIds
         targetReplyIds.remove(null);
-        if(targetReplyIds.size() > 0) {
+        targetReplyIds.remove(0L);
+        if (!targetReplyIds.isEmpty()) {
             List<InteractionReply> targetReplies = listByIds(targetReplyIds);
             Set<Long> targetUserIds = targetReplies.stream()
-                    .filter(Predicate.not(InteractionReply::getAnonymity).or(r -> forAdmin))
+                    .filter(tr -> !Boolean.TRUE.equals(tr.getAnonymity()) || forAdmin)
                     .map(InteractionReply::getUserId)
                     .collect(Collectors.toSet());
             userIds.addAll(targetUserIds);
         }
-        // 3.3.查询用户
+
+        // 4.3 批量查询用户信息：userId -> UserDTO
         Map<Long, UserDTO> userMap = new HashMap<>(userIds.size());
-        if(userIds.size() > 0) {
+        if (!userIds.isEmpty()) {
             List<UserDTO> users = userClient.queryUserByIds(userIds);
-            userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, u -> u));
+            if (CollUtils.isNotEmpty(users)) {
+                userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, u -> u));
+            }
         }
-        // 3.4.查询用户点赞状态
-        Set<Long> bizLiked = remarkClient.isBizLiked(answerIds);
-        // 4.处理VO
+
+        // 4.4 查询当前用户点赞状态：返回我点过赞的 replyId 集合
+        Set<Long> bizLiked = remarkClient.isBizLiked(replyIds);
+
+        // 5) 组装 VO
         List<ReplyVO> list = new ArrayList<>(records.size());
         for (InteractionReply r : records) {
-            // 4.1.拷贝基础属性
+
+            // 5.1 拷贝基础字段（PO -> VO）
             ReplyVO v = BeanUtils.toBean(r, ReplyVO.class);
-            list.add(v);
-            // 4.2.回复人信息
-            if(!r.getAnonymity() || forAdmin){
+
+            // 5.2 回复人信息（匿名控制）
+            if (!Boolean.TRUE.equals(r.getAnonymity()) || forAdmin) {
                 UserDTO userDTO = userMap.get(r.getUserId());
                 if (userDTO != null) {
                     v.setUserIcon(userDTO.getIcon());
@@ -156,44 +192,28 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
                     v.setUserType(userDTO.getType());
                 }
             }
-            // 4.3.如果存在评论的目标，则需要设置目标用户信息
-            if(r.getTargetReplyId() != null){
+
+            // 5.3 目标用户信息（回复了某人时展示）
+            if (r.getTargetReplyId() != null && r.getTargetReplyId() != 0L) {
                 UserDTO targetUser = userMap.get(r.getTargetUserId());
                 if (targetUser != null) {
                     v.setTargetUserName(targetUser.getName());
                 }
             }
-            // 4.4.点赞状态
+
+            // 5.4 点赞状态
             v.setLiked(bizLiked.contains(r.getId()));
+
+            list.add(v);
         }
+
+        // 6) 返回分页结果
         return new PageDTO<>(page.getTotal(), page.getPages(), list);
     }
 
     @Override
-    @Transactional
     public void hiddenReply(Long id, Boolean hidden) {
-        // 1.查询
-        InteractionReply old = getById(id);
-        if (old == null) {
-            return;
-        }
 
-        // 2.隐藏回答
-        InteractionReply reply = new InteractionReply();
-        reply.setId(id);
-        reply.setHidden(hidden);
-        updateById(reply);
-
-        // 3.隐藏评论，先判断是否是回答，回答才需要隐藏下属评论
-        if (old.getAnswerId() != null && old.getAnswerId() != 0) {
-            // 3.1.有answerId，说明自己是评论，无需处理
-            return;
-        }
-        // 3.2.没有answerId，说明自己是回答，需要隐藏回答下的评论
-        lambdaUpdate()
-                .set(InteractionReply::getHidden, hidden)
-                .eq(InteractionReply::getAnswerId, id)
-                .update();
     }
 
     @Override
@@ -229,6 +249,7 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
             v.setUserName(userDTO.getName());
             v.setUserType(userDTO.getType());
         }
+
         // 4.3.目标用户
         UserDTO targetUser = userMap.get(r.getTargetUserId());
         if (targetUser != null) {

@@ -186,6 +186,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         saveOrderAndDetails(order, CollUtils.singletonList(detail));
 
         // 5.发送MQ消息，通知报名成功
+
         rabbitMqHelper.send(
                 MqConstants.Exchange.ORDER_EXCHANGE,
                 MqConstants.Key.ORDER_PAY_KEY,
@@ -196,6 +197,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                         .finishTime(order.getFinishTime())
                         .build()
         );
+
         // 6.返回vo
         return PlaceOrderResultVO.builder()
                 .orderId(orderId)

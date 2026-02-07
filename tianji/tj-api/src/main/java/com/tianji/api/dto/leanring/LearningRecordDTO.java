@@ -13,4 +13,7 @@ public class LearningRecordDTO {
     private Integer moment;
     @ApiModelProperty("是否完成学习，默认false")
     private Boolean finished;
+
+    public void setUserId(Long userId) {
+    }
 }

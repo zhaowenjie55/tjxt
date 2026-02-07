@@ -3,9 +3,22 @@ spring:
     nacos:
       server-addr: 192.168.150.101:8848 # nacos注册中心
       discovery:
+        enabled: false  # 🔴 本地开发禁用 Nacos 注册
         namespace: f923fb34-cb0a-4c06-8fca-ad61ea61a3f0
         group: DEFAULT_GROUP
         ip: 192.168.150.1
+      config:
+        enabled: false  # 🔴 本地开发禁用 Nacos 配置中心
+  # 临时数据源配置（因为 Nacos 中的 shared-mybatis.yaml 为空）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://192.168.150.101:3306/tj_user?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123
+  # 修复 Swagger 与 Spring Boot 2.7.2 兼容性问题
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
 logging:
   level:
     com.tianji: debug

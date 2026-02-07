@@ -12,6 +12,12 @@ public class LoginAuthInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // 0.OPTIONS 预检请求直接放行（CORS 跨域需要）
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            response.setStatus(200);
+            return true;
+        }
+        
         // 1.尝试获取用户信息
         Long userId = UserContext.getUser();
         // 2.判断是否登录

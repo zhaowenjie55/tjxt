@@ -1,5 +1,6 @@
 package com.tianji.promotion.service.impl;
 
+import com.alibaba.nacos.client.naming.utils.CollectionUtils;
 import com.tianji.api.dto.promotion.CouponDiscountDTO;
 import com.tianji.api.dto.promotion.OrderCouponDTO;
 import com.tianji.api.dto.promotion.OrderCourseDTO;
@@ -7,6 +8,7 @@ import com.tianji.common.utils.CollUtils;
 import com.tianji.common.utils.UserContext;
 import com.tianji.promotion.domain.po.Coupon;
 import com.tianji.promotion.domain.po.CouponScope;
+import com.tianji.promotion.domain.po.UserCoupon;
 import com.tianji.promotion.enums.UserCouponStatus;
 import com.tianji.promotion.mapper.UserCouponMapper;
 import com.tianji.promotion.service.ICouponScopeService;
@@ -43,32 +45,32 @@ public class DiscountServiceImpl implements IDiscountService {
         if (CollUtils.isEmpty(coupons)) {
             return CollUtils.emptyList();
         }
-        // 2.初筛
-        // 2.1.计算订单总价
+// 2.初筛
+// 2.1.计算订单总价
         int totalAmount = orderCourses.stream().mapToInt(OrderCourseDTO::getPrice).sum();
-        // 2.2.筛选可用券
+// 2.2.筛选可用券
         List<Coupon> availableCoupons = coupons.stream()
                 .filter(c -> DiscountStrategy.getDiscount(c.getDiscountType()).canUse(totalAmount, c))
                 .collect(Collectors.toList());
         if (CollUtils.isEmpty(availableCoupons)) {
             return CollUtils.emptyList();
         }
-        // 3.排列组合出所有方案
-        // 3.1.细筛（找出每一个优惠券的可用的课程，判断课程总价是否达到优惠券的使用需求）
+// 3.排列组合出所有方案
+// 3.1.细筛（找出每一个优惠券的可用的课程，判断课程总价是否达到优惠券的使用需求）
         Map<Coupon, List<OrderCourseDTO>> availableCouponMap = findAvailableCoupon(availableCoupons, orderCourses);
         if (CollUtils.isEmpty(availableCouponMap)) {
             return CollUtils.emptyList();
         }
-        // 3.2.排列组合
+// 3.2.排列组合
         availableCoupons = new ArrayList<>(availableCouponMap.keySet());
         List<List<Coupon>> solutions = PermuteUtil.permute(availableCoupons);
-        // 3.3.添加单券的方案
+// 3.3.添加单券的方案
         for (Coupon c : availableCoupons) {
             solutions.add(List.of(c));
         }
-        // 4.计算方案的优惠明细
+// 4.计算方案的优惠明细
         List<CouponDiscountDTO> list = Collections.synchronizedList(new ArrayList<>(solutions.size()));
-        // 4.1.定义闭锁
+// 4.1.定义闭锁
         CountDownLatch latch = new CountDownLatch(solutions.size());
         for (List<Coupon> solution : solutions) {
             // 4.2.异步计算
@@ -77,19 +79,20 @@ public class DiscountServiceImpl implements IDiscountService {
                             () -> calculateSolutionDiscount(availableCouponMap, orderCourses, solution),
                             discountSolutionExecutor
                     ).thenAccept(dto -> {
-                // 4.3.提交任务结果
-                list.add(dto);
-                latch.countDown();
-            });
+                        // 4.3.提交任务结果
+                        list.add(dto);
+                        latch.countDown();
+                    });
         }
-        // 4.4.等待运算结束
+// 4.4.等待运算结束
         try {
             latch.await(1, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             log.error("优惠方案计算被中断，{}", e.getMessage());
         }
-        // 5.筛选最优解
+// 5.筛选最优解
         return findBestSolution(list);
+
     }
 
     @Override
@@ -226,5 +229,6 @@ public class DiscountServiceImpl implements IDiscountService {
             }
         }
         return map;
+
     }
 }

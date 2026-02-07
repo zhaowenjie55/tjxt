@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tianji.common.autoconfigure.mq.RabbitMqHelper;
 import com.tianji.common.constants.MqConstants;
 import com.tianji.common.domain.dto.PageDTO;
+import com.tianji.common.exceptions.BadRequestException;
 import com.tianji.common.exceptions.BizIllegalException;
 import com.tianji.common.exceptions.DbException;
 import com.tianji.common.utils.BeanUtils;
@@ -17,6 +18,7 @@ import com.tianji.promotion.constants.PromotionConstants;
 import com.tianji.promotion.domain.dto.UserCouponDTO;
 import com.tianji.promotion.domain.po.Coupon;
 import com.tianji.promotion.domain.po.ExchangeCode;
+import com.tianji.promotion.domain.po.Promotion;
 import com.tianji.promotion.domain.po.UserCoupon;
 import com.tianji.promotion.domain.query.UserCouponQuery;
 import com.tianji.promotion.domain.vo.CouponVO;
@@ -36,6 +38,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -74,33 +77,45 @@ public class UserCouponServiceImpl extends ServiceImpl<UserCouponMapper, UserCou
     @Override
     // @Lock(name = "lock:coupon:#{couponId}")
     public void receiveCoupon(Long couponId) {
-        /*// 1.查询优惠券
-        Coupon coupon = queryCouponByCache(couponId);
-        if (coupon == null) {
-            throw new BadRequestException("优惠券不存在");
-        }
-        // 2.校验发放时间
-        LocalDateTime now = LocalDateTime.now();
-        if (now.isBefore(coupon.getIssueBeginTime()) || now.isAfter(coupon.getIssueEndTime())) {
-            throw new BadRequestException("优惠券发放已经结束或尚未开始");
-        }
-        // 3.校验库存
-        if (coupon.getTotalNum() <= 0) {
-            throw new BadRequestException("优惠券库存不足");
-        }
-        Long userId = UserContext.getUser();
-        // 4.校验每人限领数量
-        // 4.1.查询领取数量
-        String key = PromotionConstants.USER_COUPON_CACHE_KEY_PREFIX + couponId;
-        Long count = redisTemplate.opsForHash().increment(key, userId.toString(), 1);
-        // 4.2.校验限领数量
-        if(count > coupon.getUserLimit()){
-            throw new BadRequestException("超出领取数量");
-        }
-        // 5.扣减优惠券库存
-        redisTemplate.opsForHash().increment(
-                PromotionConstants.COUPON_CACHE_KEY_PREFIX + couponId, "totalNum", -1);
-*/
+//        // 1.查询发放中的优惠券列表
+//        List<Coupon> coupons = lambdaQuery()
+//                .eq(Coupon::getStatus, ISSUING)
+//                .eq(Coupon::getObtainWay, ObtainType.PUBLIC)
+//                .list();
+//        if (CollUtils.isEmpty(coupons)) {
+//            return CollUtils.emptyList();
+//        }
+//         // 2.统计当前用户已经领取的优惠券的信息
+//        List<Long> couponIds = coupons.stream().map(Coupon::getId).collect(Collectors.toList());
+//        // 2.1.查询当前用户已经领取的优惠券的数据
+//        List<UserCoupon> userCoupons = userCouponService.lambdaQuery()
+//                .eq(UserCoupon::getUserId, UserContext.getUser())
+//                .in(UserCoupon::getCouponId, couponIds)
+//                .list();
+//        // 2.2.统计当前用户对优惠券的已经领取数量
+//        Map<Long, Long> issuedMap = userCoupons.stream()
+//                .collect(Collectors.groupingBy(UserCoupon::getCouponId, Collectors.counting()));
+//        // 2.3.统计当前用户对优惠券的已经领取并且未使用的数量
+//        Map<Long, Long> unusedMap = userCoupons.stream()
+//                .filter(uc -> uc.getStatus() == UserCouponStatus.UNUSED)
+//                .collect(Collectors.groupingBy(UserCoupon::getCouponId, Collectors.counting()));
+//         // 3.封装VO结果
+//        List<CouponVO> list = new ArrayList<>(coupons.size());
+//        for (Coupon c : coupons) {
+//            // 3.1.拷贝PO属性到VO
+//            CouponVO vo = BeanUtils.copyBean(c, CouponVO.class);
+//            list.add(vo);
+//            // 3.2.是否可以领取：已经被领取的数量 < 优惠券总数量 && 当前用户已经领取的数量 < 每人限领数量
+//            vo.setAvailable(
+//                    c.getIssueNum() < c.getTotalNum() &&
+//                            issuedMap.getOrDefault(c.getId(), 0L) < c.getUserLimit()
+//            );
+//            // 3.3.是否可以使用：当前用户已经领取并且未使用的优惠券数量 > 0
+//            vo.setReceived(unusedMap.getOrDefault(c.getId(), 0L) > 0);
+//        }
+//        return list;
+
+
         // 1.执行LUA脚本，判断结果
         // 1.1.准备参数
         String key1 = PromotionConstants.COUPON_CACHE_KEY_PREFIX + couponId;
@@ -355,4 +370,4 @@ public class UserCouponServiceImpl extends ServiceImpl<UserCouponMapper, UserCou
         // 3.保存
         save(uc);
     }
-}
+    }

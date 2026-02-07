@@ -1,6 +1,9 @@
 package com.tianji.learning.service.impl;
 
+import com.alibaba.nacos.client.naming.utils.CollectionUtils;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tianji.api.cache.CategoryCache;
@@ -30,6 +33,7 @@ import com.tianji.learning.mapper.InteractionReplyMapper;
 import com.tianji.learning.service.IInteractionQuestionService;
 import com.tianji.learning.service.IInteractionReplyService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Bean;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -54,6 +58,7 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
     private final SearchClient searchClient;
     private final CatalogueClient catalogueClient;
     private final CategoryCache categoryCache;
+    private final IInteractionReplyService iInteractionReplyService;
 
     @Override
     public void saveQuestion(QuestionFormDTO questionDTO) {
@@ -66,87 +71,123 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
         save(question);
     }
 
+
+    /**
+     * queryQuestionPage 的核心逻辑是：
+     * 先根据课程/小节分页查询问题列表，然后收集所有相关的用户 ID 和回答 ID，
+     * 统一批量查询用户信息和回答信息，最后按顺序封装到 QuestionVO 中并返回分页结果。
+     * 通过批量查询避免了典型的 N+1 性能问题，同时处理了匿名逻辑与最新回答逻辑。
+     * @param query
+     * @return
+     */
     @Override
     public PageDTO<QuestionVO> queryQuestionPage(QuestionPageQuery query) {
-        // 1.参数校验，课程id和小节id不能都为空
+
+        // 1) 参数校验：课程id、小节id 必须有
         Long courseId = query.getCourseId();
         Long sectionId = query.getSectionId();
-        if (courseId == null && sectionId == null) {
-            throw new BadRequestException("课程id和小节id不能都为空");
+        if (courseId == null || sectionId == null) {
+            throw new BadRequestException("课程ID和小节ID不能为空");
         }
-        // 2.分页查询
+
+        // 2) 分页查询问题列表（interaction_question）
         Page<InteractionQuestion> page = lambdaQuery()
+                // 2.1 不查询 description（一般是大字段，列表页不需要，减小开销）
                 .select(InteractionQuestion.class, info -> !info.getProperty().equals("description"))
-                .eq(query.getOnlyMine(), InteractionQuestion::getUserId, UserContext.getUser())
-                .eq(courseId != null, InteractionQuestion::getCourseId, courseId)
-                .eq(sectionId != null, InteractionQuestion::getSectionId, sectionId)
+                // 2.2 onlyMine=true 时才加 “只看我的” 条件
+                .eq(Boolean.TRUE.equals(query.getOnlyMine()), InteractionQuestion::getUserId, UserContext.getUser())
+                // 2.3 固定条件：课程 + 小节
+                .eq(InteractionQuestion::getCourseId, courseId)
+                .eq(InteractionQuestion::getSectionId, sectionId)
+                // 2.4 只查未隐藏的问题
                 .eq(InteractionQuestion::getHidden, false)
+                // 2.5 分页 + 默认按创建时间倒序
                 .page(query.toMpPageDefaultSortByCreateTimeDesc());
+
         List<InteractionQuestion> records = page.getRecords();
         if (CollUtils.isEmpty(records)) {
             return PageDTO.empty(page);
         }
-        // 3.根据id查询提问者和最近一次回答的信息
+
+        // 3) 收集要批量查询的数据：用户id、最新回答id（避免N+1）
         Set<Long> userIds = new HashSet<>();
         Set<Long> answerIds = new HashSet<>();
-        // 3.1.得到问题当中的提问者id和最近一次回答的id
+
         for (InteractionQuestion q : records) {
-            if(!q.getAnonymity()) { // 只查询非匿名的问题
+            // 3.1 匿名提问者不查用户信息
+            if (!Boolean.TRUE.equals(q.getAnonymity())) {
                 userIds.add(q.getUserId());
             }
+            // 3.2 收集最新回答id（可能为null）
             answerIds.add(q.getLatestAnswerId());
         }
-        // 3.2.根据id查询最近一次回答
+
+        // 去掉 null，避免 selectBatchIds 里出现 null
         answerIds.remove(null);
+
+        // 4) 批量查询最新回答，并转成 map：answerId -> reply
         Map<Long, InteractionReply> replyMap = new HashMap<>(answerIds.size());
-        if(CollUtils.isNotEmpty(answerIds)) {
+        if (CollUtils.isNotEmpty(answerIds)) {
             List<InteractionReply> replies = replyMapper.selectBatchIds(answerIds);
             for (InteractionReply reply : replies) {
                 replyMap.put(reply.getId(), reply);
-                if(!reply.getAnonymity()){
+
+                // 4.1 匿名回答者不查用户信息
+                if (!Boolean.TRUE.equals(reply.getAnonymity())) {
                     userIds.add(reply.getUserId());
                 }
             }
         }
 
-        // 3.3.根据id查询用户信息（提问者）
+        // 5) 批量查询用户信息，并转 map：userId -> UserDTO
         userIds.remove(null);
         Map<Long, UserDTO> userMap = new HashMap<>(userIds.size());
-        if(CollUtils.isNotEmpty(userIds)) {
+        if (CollUtils.isNotEmpty(userIds)) {
             List<UserDTO> users = userClient.queryUserByIds(userIds);
-            userMap = users.stream()
-                    .collect(Collectors.toMap(UserDTO::getId, u -> u));
+            if (CollUtils.isNotEmpty(users)) {
+                userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, u -> u));
+            }
         }
 
-        // 4.封装VO
+        // 6) PO -> VO 并补齐展示字段（用户名/头像/最新回复内容/最新回复人）
         List<QuestionVO> voList = new ArrayList<>(records.size());
         for (InteractionQuestion r : records) {
-            // 4.1.将PO转为VO
+
+            // 6.1 基础字段拷贝（PO -> VO）
             QuestionVO vo = BeanUtils.copyBean(r, QuestionVO.class);
-            voList.add(vo);
-            // 4.2.封装提问者信息
-            if(!r.getAnonymity()){
-                UserDTO userDTO = userMap.get(r.getUserId());
-                if (userDTO != null) {
-                    vo.setUserName(userDTO.getName());
-                    vo.setUserIcon(userDTO.getIcon());
+
+            // 6.2 提问者信息（非匿名才填）
+            if (!Boolean.TRUE.equals(r.getAnonymity())) {
+                UserDTO asker = userMap.get(r.getUserId());
+                if (asker != null) {
+                    vo.setUserName(asker.getName());
+                    vo.setUserIcon(asker.getIcon());
                 }
             }
 
-            // 4.3.封装最近一次回答的信息
+            // 6.3 最新回复信息
             InteractionReply reply = replyMap.get(r.getLatestAnswerId());
             if (reply != null) {
                 vo.setLatestReplyContent(reply.getContent());
-                if(!reply.getAnonymity()){
-                    UserDTO user = userMap.get(reply.getUserId());
-                    vo.setLatestReplyUser(user.getName());
-                }
 
+                // 最新回复人（非匿名才填）
+                if (!Boolean.TRUE.equals(reply.getAnonymity())) {
+                    UserDTO replier = userMap.get(reply.getUserId());
+                    if (replier != null) { // 这里加判空更稳
+                        vo.setLatestReplyUser(replier.getName());
+                    }
+                }
             }
+
+            voList.add(vo);
         }
 
+        // 7) 返回分页结果
         return PageDTO.of(page, voList);
     }
+
+
+
 
     @Override
     public QuestionVO queryQuestionById(Long id) {
@@ -169,8 +210,17 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
             vo.setUserIcon(user.getIcon());
         }
         return vo;
+
     }
 
+    /**
+     * queryQuestionPageAdmin 是“后台问题管理列表”的分页查询方法：
+     * 先根据课程名关键字通过搜索服务转换出课程 ID 列表，再结合状态、时间区间拼出查询条件从 interaction_question 表里分页查问题；
+     * 然后批量查询提问者、课程、章节/小节信息，避免 N+1 查询；
+     * 最后将这些信息组装成 QuestionAdminVO 列表并配上分页信息，返回给前端用于渲染问题管理页面。
+     * @param query
+     * @return
+     */
     @Override
     public PageDTO<QuestionAdminVO> queryQuestionPageAdmin(QuestionAdminPageQuery query) {
         // 1.处理课程名称，得到课程id
@@ -181,7 +231,7 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
                 return PageDTO.empty(0L, 0L);
             }
         }
-        // 2.分页查询
+// 2.分页查询
         Integer status = query.getStatus();
         LocalDateTime begin = query.getBeginTime();
         LocalDateTime end = query.getEndTime();
@@ -191,37 +241,40 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
                 .gt(begin != null, InteractionQuestion::getCreateTime, begin)
                 .lt(end != null, InteractionQuestion::getCreateTime, end)
                 .page(query.toMpPageDefaultSortByCreateTimeDesc());
+
+// 得到分页的纪录
         List<InteractionQuestion> records = page.getRecords();
         if (CollUtils.isEmpty(records)) {
             return PageDTO.empty(page);
         }
 
-        // 3.准备VO需要的数据：用户数据、课程数据、章节数据
+// 3.准备VO需要的数据：用户数据、课程数据、章节数据
         Set<Long> userIds = new HashSet<>();
         Set<Long> cIds = new HashSet<>();
         Set<Long> cataIds = new HashSet<>();
-        // 3.1.获取各种数据的id集合
+// 3.1.获取各种数据的id集合
         for (InteractionQuestion q : records) {
             userIds.add(q.getUserId());
             cIds.add(q.getCourseId());
             cataIds.add(q.getChapterId());
             cataIds.add(q.getSectionId());
         }
-        // 3.2.根据id查询用户
+// 3.2.根据id查询用户
+// userClient 调用用户服务的接口，批量查询用户信息
         List<UserDTO> users = userClient.queryUserByIds(userIds);
         Map<Long, UserDTO> userMap = new HashMap<>(users.size());
         if (CollUtils.isNotEmpty(users)) {
             userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, u -> u));
         }
 
-        // 3.3.根据id查询课程
+// 3.3.根据id查询课程
         List<CourseSimpleInfoDTO> cInfos = courseClient.getSimpleInfoList(cIds);
         Map<Long, CourseSimpleInfoDTO> cInfoMap = new HashMap<>(cInfos.size());
         if (CollUtils.isNotEmpty(cInfos)) {
             cInfoMap = cInfos.stream().collect(Collectors.toMap(CourseSimpleInfoDTO::getId, c -> c));
         }
 
-        // 3.4.根据id查询章节
+// 3.4.根据id查询章节
         List<CataSimpleInfoDTO> catas = catalogueClient.batchQueryCatalogue(cataIds);
         Map<Long, String> cataMap = new HashMap<>(catas.size());
         if (CollUtils.isNotEmpty(catas)) {
@@ -230,7 +283,7 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
         }
 
 
-        // 4.封装VO
+// 4.封装VO
         List<QuestionAdminVO> voList = new ArrayList<>(records.size());
         for (InteractionQuestion q : records) {
             // 4.1.将PO转VO，属性拷贝
@@ -252,8 +305,18 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
             vo.setSectionName(cataMap.getOrDefault(q.getSectionId(), ""));
         }
         return PageDTO.of(page, voList);
+
     }
 
+    /**
+     * queryQuestionByIdAdmin(Long id) 用于后台管理员查看问题详情。
+     * 它首先从问题表查出问题实体，并拷贝成 VO；
+     * 然后通过用户服务获取提问者昵称和头像；
+     * 再通过课程服务获取课程名称、分类名称和授课老师列表；
+     * 最后通过目录服务查询问题所属的章节和小节名称，全部写入 QuestionAdminVO 返回。
+     * @param id
+     * @return
+     */
     @Override
     public QuestionAdminVO queryQuestionByIdAdmin(Long id) {
         // 1.根据id查询问题
@@ -286,17 +349,18 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
             }
         }
         // 5.查询章节信息
-        List<CataSimpleInfoDTO> catas = catalogueClient.batchQueryCatalogue(
+        List<CataSimpleInfoDTO> catalogue = catalogueClient.batchQueryCatalogue(
                 List.of(question.getChapterId(), question.getSectionId()));
-        Map<Long, String> cataMap = new HashMap<>(catas.size());
-        if (CollUtils.isNotEmpty(catas)) {
-            cataMap = catas.stream()
+        Map<Long, String> cataMap = new HashMap<>(catalogue.size());
+        if (CollUtils.isNotEmpty(catalogue)) {
+            cataMap = catalogue.stream()
                     .collect(Collectors.toMap(CataSimpleInfoDTO::getId, CataSimpleInfoDTO::getName));
         }
         vo.setChapterName(cataMap.getOrDefault(question.getChapterId(), ""));
         vo.setSectionName(cataMap.getOrDefault(question.getSectionId(), ""));
         // 6.封装VO
         return vo;
+
     }
 
     @Override

@@ -36,62 +36,72 @@ public class PointsRecordServiceImpl extends ServiceImpl<PointsRecordMapper, Poi
     public void addPointsRecord(Long userId, int points, PointsRecordType type) {
         LocalDateTime now = LocalDateTime.now();
         int maxPoints = type.getMaxPoints();
-        // 1.判断当前方式有没有积分上限
         int realPoints = points;
-        if(maxPoints > 0) {
-            // 2.有，则需要判断是否超过上限
+        if (maxPoints > 0) {
             LocalDateTime begin = DateUtils.getDayStartTime(now);
             LocalDateTime end = DateUtils.getDayEndTime(now);
-            // 2.1.查询今日已得积分
             int currentPoints = queryUserPointsByTypeAndDate(userId, type, begin, end);
-            // 2.2.判断是否超过上限
-            if(currentPoints >= maxPoints) {
-                // 2.3.超过，直接结束
+            if (currentPoints >= maxPoints) {
                 return;
             }
-            // 2.4.没超过，保存积分记录
-            if(currentPoints + points > maxPoints){
+            if (currentPoints + points > maxPoints) {
                 realPoints = maxPoints - currentPoints;
             }
         }
-        // 3.没有，直接保存积分记录
         PointsRecord p = new PointsRecord();
         p.setPoints(realPoints);
         p.setUserId(userId);
         p.setType(type);
         save(p);
-        // 4.更新总积分到Redis
+
         String key = RedisConstants.POINTS_BOARD_KEY_PREFIX + now.format(DateUtils.POINTS_BOARD_SUFFIX_FORMATTER);
         redisTemplate.opsForZSet().incrementScore(key, userId.toString(), realPoints);
+
     }
 
     @Override
     public List<PointsStatisticsVO> queryMyPointsToday() {
-        // 1.获取用户
-        Long userId = UserContext.getUser();
-        // 2.获取日期
+        // 1. 获取当前登录用户（ThreadLocal 中保存）
+        Long user = UserContext.getUser();
+
+        // 2. 计算“今天”的时间范围
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime begin = DateUtils.getDayStartTime(now);
-        LocalDateTime end = DateUtils.getDayEndTime(now);
-        // 3.构建查询条件
+        LocalDateTime begin = DateUtils.getDayStartTime(now); // 今天 00:00:00
+        LocalDateTime end = DateUtils.getDayEndTime(now);     // 今天 23:59:59
+
+        // 3. 构建查询条件：当前用户 + 今天时间范围
         QueryWrapper<PointsRecord> wrapper = new QueryWrapper<>();
         wrapper.lambda()
-                .eq(PointsRecord::getUserId, userId)
+                .eq(PointsRecord::getUserId, user)
                 .between(PointsRecord::getCreateTime, begin, end);
-        // 4.查询
+
+        // 4. 调用自定义 mapper 方法
+        //    注意：这里通常是按积分类型做了聚合（SUM + GROUP BY）
         List<PointsRecord> list = getBaseMapper().queryUserPointsByDate(wrapper);
+
+        // 5. 如果今天没有任何积分记录，直接返回空列表
         if (CollUtils.isEmpty(list)) {
-            return CollUtils.emptyList();
+            return new ArrayList<>();
         }
-        // 5.封装返回
+
+        // 6. PO → VO 转换，封装前端需要的数据结构
         List<PointsStatisticsVO> vos = new ArrayList<>(list.size());
         for (PointsRecord p : list) {
             PointsStatisticsVO vo = new PointsStatisticsVO();
+
+            // 积分类型描述（来自枚举）
             vo.setType(p.getType().getDesc());
+
+            // 该积分类型的每日上限（来自枚举规则）
             vo.setMaxPoints(p.getType().getMaxPoints());
+
+            // 今天该类型实际获得的积分
             vo.setPoints(p.getPoints());
+
             vos.add(vo);
         }
+
+        // 7. 返回今日积分统计结果
         return vos;
     }
 

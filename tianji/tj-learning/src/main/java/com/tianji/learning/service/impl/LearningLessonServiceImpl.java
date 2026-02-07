@@ -10,7 +10,6 @@ import com.tianji.api.dto.IdAndNumDTO;
 import com.tianji.api.dto.course.CataSimpleInfoDTO;
 import com.tianji.api.dto.course.CourseFullInfoDTO;
 import com.tianji.api.dto.course.CourseSimpleInfoDTO;
-import com.tianji.common.domain.dto.PageDTO;
 import com.tianji.common.domain.query.PageQuery;
 import com.tianji.common.exceptions.BadRequestException;
 import com.tianji.common.utils.*;
@@ -58,6 +57,7 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
     @Override
     @Transactional
     public void addUserLessons(Long userId, List<Long> courseIds) {
+
         // 1.查询课程有效期
         List<CourseSimpleInfoDTO> cInfoList = courseClient.getSimpleInfoList(courseIds);
         if (CollUtils.isEmpty(cInfoList)) {
@@ -83,39 +83,109 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
         }
         // 3.批量新增
         saveBatch(list);
+
     }
 
+    /**
+     * 分页查询我的课表
+     *
+     * @param query 分页参数（页码、每页大小等）
+     * @return 分页后的“我的课表”VO数据
+     */
     @Override
-    public PageDTO<LearningLessonVO> queryMyLessons(PageQuery query) {
-        // 1.获取当前登录用户
+    public LearningLessonVO queryMyLessons(PageQuery query) {
+        // 1.获取当前登录的用户
         Long userId = UserContext.getUser();
-        // 2.分页查询
-        // select * from learning_lesson where user_id = #{userId} order by latest_learn_time limit 0, 5
-        Page<LearningLesson> page = lambdaQuery()
-                .eq(LearningLesson::getUserId, userId) // where user_id = #{userId}
-                .page(query.toMpPage("latest_learn_time", false));
-        List<LearningLesson> records = page.getRecords();
-        if (CollUtils.isEmpty(records)) {
-            return PageDTO.empty(page);
+        // 2.查询正在学习的课程 select * from xx where user_id = #{userId} AND status = 1 order by latest_learn_time limit 1
+        // lesson 正在学习的课程
+        LearningLesson lesson = lambdaQuery()
+                .eq(LearningLesson::getUserId, userId)
+                .eq(LearningLesson::getStatus, LessonStatus.LEARNING.getValue())
+                .orderByDesc(LearningLesson::getLatestLearnTime)
+                .last("limit 1")
+                .one();
+        if (lesson == null) {
+            return null;
         }
-        // 3.查询课程信息
-        Map<Long, CourseSimpleInfoDTO> cMap = queryCourseSimpleInfoList(records);
+        // 3.拷贝PO基础属性到VO
+        LearningLessonVO vo = BeanUtils.copyBean(lesson, LearningLessonVO.class);
+        // 4.查询课程信息
+        CourseFullInfoDTO cInfo = courseClient.getCourseInfoById(lesson.getCourseId(), false, false);
+        if (cInfo == null) {
+            throw new BadRequestException("课程不存在");
+        }
+        vo.setCourseName(cInfo.getName());
+        vo.setCourseCoverUrl(cInfo.getCoverUrl());
+        vo.setSections(cInfo.getSectionNum());
+        // 5.统计课表中的课程数量 select count(1) from xxx where user_id = #{userId}
+        Integer courseAmount = lambdaQuery()
+                .eq(LearningLesson::getUserId, userId)
+                .count();
+        vo.setCourseAmount(courseAmount);
+        // 6.查询小节信息
+        List<CataSimpleInfoDTO> cataInfos =
+                catalogueClient.batchQueryCatalogue(CollUtils.singletonList(lesson.getLatestSectionId()));
+        if (!CollUtils.isEmpty(cataInfos)) {
+            CataSimpleInfoDTO cataInfo = cataInfos.get(0);
+            vo.setLatestSectionName(cataInfo.getName());
+            vo.setLatestSectionIndex(cataInfo.getCIndex());
+        }
+        return vo;
 
-        // 4.封装VO返回
-        List<LearningLessonVO> list = new ArrayList<>(records.size());
-        // 4.1.循环遍历，把LearningLesson转为VO
-        for (LearningLesson r : records) {
-            // 4.2.拷贝基础属性到vo
-            LearningLessonVO vo = BeanUtils.copyBean(r, LearningLessonVO.class);
-            // 4.3.获取课程信息，填充到vo
-            CourseSimpleInfoDTO cInfo = cMap.get(r.getCourseId());
-            vo.setCourseName(cInfo.getName());
-            vo.setCourseCoverUrl(cInfo.getCoverUrl());
-            vo.setSections(cInfo.getSectionNum());
-            list.add(vo);
-        }
-        return PageDTO.of(page, list);
+
+
     }
+
+
+    /*
+   queryMyCurrentLesson() 用来查询当前登录用户正在学习的课程：
+   先从 learning_lesson 表中按 user_id 和 status=LEARNING 查出最近学习的一门课；
+   然后把课表 PO 拷贝到 VO，并通过课程服务补充课程名称、封面和总小节数；
+   再统计该用户在课表中的课程总数，写入 courseAmount；
+   最后调用目录服务，查询最近学习小节的名称和序号，封装到 VO 中一起返回。
+    */
+    @Override
+    public LearningLessonVO queryMyCurrentLesson() {
+        // 1.获取当前登录的用户
+        Long userId = UserContext.getUser();
+        // 2.查询正在学习的课程 select * from xx where user_id = #{userId} AND status = 1 order by latest_learn_time limit 1
+        // lesson 正在学习的课程
+        LearningLesson lesson = lambdaQuery()
+                .eq(LearningLesson::getUserId, userId)
+                .eq(LearningLesson::getStatus, LessonStatus.LEARNING.getValue())
+                .orderByDesc(LearningLesson::getLatestLearnTime)
+                .last("limit 1")
+                .one();
+        if (lesson == null) {
+            return null;
+        }
+        // 3.拷贝PO基础属性到VO
+        LearningLessonVO vo = BeanUtils.copyBean(lesson, LearningLessonVO.class);
+        // 4.查询课程信息
+        CourseFullInfoDTO cInfo = courseClient.getCourseInfoById(lesson.getCourseId(), false, false);
+        if (cInfo == null) {
+            throw new BadRequestException("课程不存在");
+        }
+        vo.setCourseName(cInfo.getName());
+        vo.setCourseCoverUrl(cInfo.getCoverUrl());
+        vo.setSections(cInfo.getSectionNum());
+        // 5.统计课表中的课程数量 select count(1) from xxx where user_id = #{userId}
+        Integer courseAmount = lambdaQuery()
+                .eq(LearningLesson::getUserId, userId)
+                .count();
+        vo.setCourseAmount(courseAmount);
+        // 6.查询小节信息
+        List<CataSimpleInfoDTO> cataInfos =
+                catalogueClient.batchQueryCatalogue(CollUtils.singletonList(lesson.getLatestSectionId()));
+        if (!CollUtils.isEmpty(cataInfos)) {
+            CataSimpleInfoDTO cataInfo = cataInfos.get(0);
+            vo.setLatestSectionName(cataInfo.getName());
+            vo.setLatestSectionIndex(cataInfo.getCIndex());
+        }
+        return vo;
+
+    }
+
 
     private Map<Long, CourseSimpleInfoDTO> queryCourseSimpleInfoList(List<LearningLesson> records) {
         // 3.1.获取课程id
@@ -132,11 +202,15 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
         return cMap;
     }
 
+
+
+
     @Override
-    public LearningLessonVO queryMyCurrentLesson() {
+    public LearningLessonVO queryMycurrentLesson() {
         // 1.获取当前登录的用户
         Long userId = UserContext.getUser();
         // 2.查询正在学习的课程 select * from xx where user_id = #{userId} AND status = 1 order by latest_learn_time limit 1
+        // lesson 正在学习的课程
         LearningLesson lesson = lambdaQuery()
                 .eq(LearningLesson::getUserId, userId)
                 .eq(LearningLesson::getStatus, LessonStatus.LEARNING.getValue())
@@ -171,6 +245,7 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
         }
         return vo;
     }
+
 
     @Override
     public LearningLessonVO queryLessonByCourseId(Long courseId) {
@@ -209,13 +284,12 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
 
     @Override
     public Long isLessonValid(Long courseId) {
-        // 1.获取登录用户
-        Long userId = UserContext.getUser();
-        if (userId == null) {
+        Long user = UserContext.getUser();
+        if (user == null) {
             return null;
         }
-        // 2.查询课程
-        LearningLesson lesson = getOne(buildUserIdAndCourseIdWrapper(userId, courseId));
+        // 查询课表信息
+        LearningLesson lesson = getOne(buildUserIdAndCourseIdWrapper(user, courseId));
         if (lesson == null) {
             return null;
         }
@@ -242,8 +316,22 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
             l.setPlanStatus(PlanStatus.PLAN_RUNNING);
         }
         updateById(l);
+
     }
 
+    /*
+    这个 queryMyPlans 方法是“我的学习计划”页面的数据接口：
+    先根据当前日期算出本周时间范围，然后统计当前用户本周已完成小节总数和本周计划学习的小节总数；
+    再从课表中分页查出所有“计划进行中且未学完”的课程，
+    为每门课程补充课程名称、总小节数，并结合学习记录表统计这门课本周已完成的小节数量，
+    最后把这些课程计划数据封装成 LearningPlanPageVO 按分页形式返回。
+     */
+
+    /**
+     * 先算本周范围 → 统计本周总完成数 + 本周总计划数 → 分页查“计划执行中的课程” → 补课程信息 → 统计每门课本周完成数 → 组装成分页 VO 返回。
+     * @param query
+     * @return
+     */
     @Override
     public LearningPlanPageVO queryMyPlans(PageQuery query) {
         LearningPlanPageVO result = new LearningPlanPageVO();
@@ -255,6 +343,16 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
         LocalDateTime end = DateUtils.getWeekEndTime(now);
         // 3.查询总的统计数据
         // 3.1.本周总的已学习小节数量
+
+        // SELECT COUNT(*)
+        // FROM learning_record
+        // WHERE user_id = #{userId}
+        //  AND finished = true
+        //  AND finish_time > #{begin}
+        //  AND finish_time < #{end};
+
+        // recordMapper.selectCount 这个方法是MyBatis-Plus提供的一个通用方法，用于统计符合特定条件的记录数量。
+        // 所以在这里不用写SQL语句，直接使用MyBatis-Plus的条件构造器来构建查询条件。
         Integer weekFinished = recordMapper.selectCount(new LambdaQueryWrapper<LearningRecord>()
                 .eq(LearningRecord::getUserId, userId)
                 .eq(LearningRecord::getFinished, true)
@@ -308,4 +406,5 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
                 .eq(LearningLesson::getCourseId, courseId);
         return queryWrapper;
     }
+
 }

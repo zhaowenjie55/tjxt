@@ -12,8 +12,7 @@ public enum DiscountType implements BaseEnum {
     PER_PRICE_DISCOUNT(1, "每满减"){
         @Override
         public Discount getDiscount(Coupon coupon) {
-            return new PerPriceDiscount(
-                    coupon.getDiscountValue(), coupon.getThresholdAmount(), coupon.getMaxDiscountAmount());
+            return new PerPriceDiscount();
         }
     },
     RATE_DISCOUNT(2, "折扣"){
